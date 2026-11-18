@@ -1,6 +1,6 @@
 name: Build APK
 on: [push, workflow_dispatch]
-
+ # 18.11.2026 Q4
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -34,7 +34,7 @@ jobs:
           python - <<'PY'
           import configparser
           cp = configparser.ConfigParser(strict=False)
-          cp.optionxform = str                      # сохраняем регистр ключей
+          cp.optionxform = str
           cp.read('buildozer.spec', encoding='utf-8')
           settings = {
               'title': 'Карточки слов',
@@ -60,7 +60,7 @@ jobs:
               cp.set('app', key, value)
           with open('buildozer.spec', 'w', encoding='utf-8') as f:
               cp.write(f)
-          print('Настройки применены, дубликатов нет')
+          print('Настройки применены')
           PY
           echo "--- итоговый spec ---"
           grep -E "^(title|package\.|version|requirements|orientation|source\.include_exts|android\.(api|ndk|archs|permissions|accept_sdk_license)|p4a\.branch)" buildozer.spec
@@ -69,32 +69,40 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.buildozer
-          key: buildozer-${{ hashFiles('buildozer.spec') }}-v3
+          key: buildozer-${{ hashFiles('buildozer.spec') }}-v4
 
-      # строго ПОСЛЕ кэша, иначе кэш затрёт файлы лицензий
-      - name: Принятие лицензий Android SDK
+      # самолечение: если из кэша приехала пустая папка SDK — удаляем её,
+      # чтобы Buildozer скачал SDK заново
+      - name: Проверка целостности SDK
         run: |
           SDK="$HOME/.buildozer/android/platform/android-sdk"
-          mkdir -p "$SDK/licenses"
-          printf '\n8933bad161af4178b1185d1a37fbf41ea5269c55\nd56f5187479451eabf01fb78af6dfcb131a6481e\n24333f8a63b6825ea9c5514f83c2829b004d1fee\n' > "$SDK/licenses/android-sdk-license"
-          printf '\n84831b9409646a918e30573bab4c9c91346d8abd\n' > "$SDK/licenses/android-sdk-preview-license"
-          printf '\nd975f751698a77b662f1254ddbeed3901e976f5a\n' > "$SDK/licenses/intel-android-extra-license"
-          printf '\n33b6a2b64607f11b759f320ef9dff4ae5c47d97a\n' > "$SDK/licenses/google-gdk-license"
-          printf '\ne9acab5b5fbb560a72cfaecce8946896ff6aab9d\n' > "$SDK/licenses/mips-android-sysimage-license"
-          ls -l "$SDK/licenses"
+          if [ -d "$SDK" ] && [ -z "$(find "$SDK" -type f -name sdkmanager 2>/dev/null | head -n1)" ]; then
+            echo "Найден недоустановленный SDK, удаляю: $SDK"
+            rm -rf "$SDK"
+          else
+            echo "SDK либо отсутствует, либо корректен — ок"
+          fi
 
       - name: Сборка APK
         run: |
           set -o pipefail
           SDK="$HOME/.buildozer/android/platform/android-sdk"
           if ! buildozer -v android debug 2>&1 | tee build.log; then
-            echo "=== первый проход упал: принимаем лицензии и ставим build-tools вручную ==="
+            echo "=== первый проход упал, чиним SDK и повторяем ==="
             SM="$(find "$SDK" -type f -name sdkmanager 2>/dev/null | head -n1)"
             if [ -z "$SM" ]; then
-              echo "sdkmanager не найден, повтор невозможен"; exit 1
+              echo "sdkmanager не найден — SDK не скачался, повтор невозможен"; exit 1
             fi
+            mkdir -p "$SDK/licenses"
+            printf '\n8933bad161af4178b1185d1a37fbf41ea5269c55\nd56f5187479451eabf01fb78af6dfcb131a6481e\n24333f8a63b6825ea9c5514f83c2829b004d1fee\n' > "$SDK/licenses/android-sdk-license"
+            printf '\n84831b9409646a918e30573bab4c9c91346d8abd\n' > "$SDK/licenses/android-sdk-preview-license"
+            printf '\nd975f751698a77b662f1254ddbeed3901e976f5a\n' > "$SDK/licenses/intel-android-extra-license"
             yes | "$SM" --sdk_root="$SDK" --licenses >/dev/null || true
             yes | "$SM" --sdk_root="$SDK" "platform-tools" "platforms;android-36" "build-tools;36.0.0" || true
+            # оставляем только те build-tools, где реально есть aidl
+            for d in "$SDK"/build-tools/*/; do
+              [ -x "${d}aidl" ] || rm -rf "$d"
+            done
             grep -q '^android.skip_update' buildozer.spec || \
               sed -i '/^\[app\]/a android.skip_update = True' buildozer.spec
             buildozer -v android debug 2>&1 | tee -a build.log
