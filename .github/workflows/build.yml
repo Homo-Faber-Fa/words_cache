@@ -3,12 +3,14 @@ on: [push, workflow_dispatch]
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+
       - uses: actions/setup-python@v6
         with:
-          python-version: '3.11'
+          python-version: '3.12'
+
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -17,38 +19,84 @@ jobs:
       - name: Системные пакеты
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential git zip unzip autoconf libtool \
-            pkg-config zlib1g-dev libncurses-dev cmake libffi-dev libssl-dev automake
+          sudo apt-get install -y build-essential git zip unzip autoconf automake libtool \
+            libltdl-dev pkg-config zlib1g-dev libncurses-dev cmake libffi-dev libssl-dev gettext
 
-      - name: Buildozer
+      - name: Установка Buildozer
         run: |
-          pip install --upgrade pip
-          pip install buildozer "cython<3.0"
+          python -m pip install --upgrade pip
+          pip install "buildozer==1.6.0" "cython<3.0" virtualenv
 
-      - name: Настройка spec
+      - name: Настройка buildozer.spec
         run: |
           [ -f buildozer.spec ] || buildozer init
-          sed -i 's/^title = .*/title = Карточки слов/' buildozer.spec
-          sed -i 's/^package.name = .*/package.name = flashcards/' buildozer.spec
-          sed -i 's/^package.domain = .*/package.domain = org.myname/' buildozer.spec
-          sed -i 's/^requirements = .*/requirements = python3,kivy==2.3.1,openssl,certifi/' buildozer.spec
-          sed -i 's/^#*source.include_exts = .*/source.include_exts = py,csv,png,jpg,kv,atlas,ttf/' buildozer.spec
-          sed -i 's/^#*android.permissions = .*/android.permissions = INTERNET/' buildozer.spec
-          sed -i 's/^#*android.accept_sdk_license = .*/android.accept_sdk_license = True/' buildozer.spec
-          sed -i 's/^#*android.archs = .*/android.archs = arm64-v8a/' buildozer.spec
-          sed -i 's/^#*orientation = .*/orientation = portrait/' buildozer.spec
-          sed -i 's/^#*android.api = .*/android.api = 33/' buildozer.spec
-          sed -i 's/^#*android.ndk = .*/android.ndk = 25b/' buildozer.spec
+          set_spec() {
+            if grep -qE "^#*[[:space:]]*$1[[:space:]]*=" buildozer.spec; then
+              sed -i -E "s|^#*[[:space:]]*$1[[:space:]]*=.*|$1 = $2|" buildozer.spec
+            else
+              sed -i "/^\[app\]/a $1 = $2" buildozer.spec
+            fi
+          }
+          set_spec title "Карточки слов"
+          set_spec package.name wordscache
+          set_spec package.domain org.homofaber
+          set_spec requirements "python3,kivy,certifi,openssl"
+          set_spec source.include_exts "py,csv,png,jpg,kv,atlas,ttf"
+          set_spec orientation portrait
+          set_spec android.permissions INTERNET
+          set_spec android.api 36
+          set_spec android.minapi 24
+          set_spec android.ndk_api 24
+          set_spec android.ndk 29
+          set_spec android.archs arm64-v8a
+          set_spec android.accept_sdk_license True
+          set_spec p4a.branch develop
+          echo "--- итоговые настройки ---"
+          grep -E "^(requirements|p4a.branch|android\.(api|ndk|archs|accept_sdk_license)|source.include_exts)" buildozer.spec
 
-      - uses: actions/cache@v5
+      - name: Кэш SDK/NDK
+        uses: actions/cache@v4
         with:
           path: ~/.buildozer
-          key: buildozer-v2-${{ hashFiles('buildozer.spec') }}
+          key: buildozer-${{ hashFiles('buildozer.spec') }}-sdkfix1
 
-      - name: Сборка
-        run: yes | buildozer -v android debug
+      # ВАЖНО: этот шаг идёт ПОСЛЕ восстановления кэша,
+      # иначе кэш перезапишет файлы лицензий
+      - name: Принятие лицензий Android SDK
+        run: |
+          SDK="$HOME/.buildozer/android/platform/android-sdk"
+          mkdir -p "$SDK/licenses"
+          printf '\n8933bad161af4178b1185d1a37fbf41ea5269c55\nd56f5187479451eabf01fb78af6dfcb131a6481e\n24333f8a63b6825ea9c5514f83c2829b004d1fee\n' > "$SDK/licenses/android-sdk-license"
+          printf '\n84831b9409646a918e30573bab4c9c91346d8abd\n' > "$SDK/licenses/android-sdk-preview-license"
+          printf '\nd975f751698a77b662f1254ddbeed3901e976f5a\n' > "$SDK/licenses/intel-android-extra-license"
+          printf '\n33b6a2b64607f11b759f320ef9dff4ae5c47d97a\n' > "$SDK/licenses/google-gdk-license"
+          printf '\ne9acab5b5fbb560a72cfaecce8946896ff6aab9d\n' > "$SDK/licenses/mips-android-sysimage-license"
+          ls -l "$SDK/licenses"
+
+      - name: Сборка APK
+        run: |
+          set -o pipefail
+          SDK="$HOME/.buildozer/android/platform/android-sdk"
+          if ! buildozer -v android debug 2>&1 | tee build.log; then
+            echo "=== первый проход упал: принимаем лицензии и ставим build-tools вручную ==="
+            SM="$(find "$SDK" -type f -name sdkmanager 2>/dev/null | head -n1)"
+            if [ -z "$SM" ]; then
+              echo "sdkmanager не найден, повтор невозможен"; exit 1
+            fi
+            yes | "$SM" --sdk_root="$SDK" --licenses >/dev/null || true
+            yes | "$SM" --sdk_root="$SDK" "platform-tools" "platforms;android-36" "build-tools;36.0.0" || true
+            sed -i -E "s|^#*[[:space:]]*android.skip_update[[:space:]]*=.*|android.skip_update = True|" buildozer.spec
+            buildozer -v android debug 2>&1 | tee -a build.log
+          fi
 
       - uses: actions/upload-artifact@v4
+        if: success()
         with:
-          name: flashcards-apk
+          name: wordscache-apk
           path: bin/*.apk
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-log
+          path: build.log
