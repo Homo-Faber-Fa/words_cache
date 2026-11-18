@@ -29,39 +29,49 @@ jobs:
 
       - name: Настройка buildozer.spec
         run: |
-          [ -f buildozer.spec ] || buildozer init
-          set_spec() {
-            if grep -qE "^#*[[:space:]]*$1[[:space:]]*=" buildozer.spec; then
-              sed -i -E "s|^#*[[:space:]]*$1[[:space:]]*=.*|$1 = $2|" buildozer.spec
-            else
-              sed -i "/^\[app\]/a $1 = $2" buildozer.spec
-            fi
+          rm -f buildozer.spec
+          buildozer init
+          python - <<'PY'
+          import configparser
+          cp = configparser.ConfigParser(strict=False)
+          cp.optionxform = str                      # сохраняем регистр ключей
+          cp.read('buildozer.spec', encoding='utf-8')
+          settings = {
+              'title': 'Карточки слов',
+              'package.name': 'wordscache',
+              'package.domain': 'org.homofaber',
+              'source.dir': '.',
+              'source.include_exts': 'py,csv,png,jpg,kv,atlas,ttf',
+              'version': '1.0',
+              'requirements': 'python3,kivy,certifi,openssl',
+              'orientation': 'portrait',
+              'fullscreen': '0',
+              'android.permissions': 'INTERNET',
+              'android.api': '36',
+              'android.minapi': '24',
+              'android.ndk_api': '24',
+              'android.ndk': '29',
+              'android.archs': 'arm64-v8a',
+              'android.accept_sdk_license': 'True',
+              'android.allow_backup': 'True',
+              'p4a.branch': 'develop',
           }
-          set_spec title "Карточки слов"
-          set_spec package.name wordscache
-          set_spec package.domain org.homofaber
-          set_spec requirements "python3,kivy,certifi,openssl"
-          set_spec source.include_exts "py,csv,png,jpg,kv,atlas,ttf"
-          set_spec orientation portrait
-          set_spec android.permissions INTERNET
-          set_spec android.api 36
-          set_spec android.minapi 24
-          set_spec android.ndk_api 24
-          set_spec android.ndk 29
-          set_spec android.archs arm64-v8a
-          set_spec android.accept_sdk_license True
-          set_spec p4a.branch develop
-          echo "--- итоговые настройки ---"
-          grep -E "^(requirements|p4a.branch|android\.(api|ndk|archs|accept_sdk_license)|source.include_exts)" buildozer.spec
+          for key, value in settings.items():
+              cp.set('app', key, value)
+          with open('buildozer.spec', 'w', encoding='utf-8') as f:
+              cp.write(f)
+          print('Настройки применены, дубликатов нет')
+          PY
+          echo "--- итоговый spec ---"
+          grep -E "^(title|package\.|version|requirements|orientation|source\.include_exts|android\.(api|ndk|archs|permissions|accept_sdk_license)|p4a\.branch)" buildozer.spec
 
       - name: Кэш SDK/NDK
         uses: actions/cache@v4
         with:
           path: ~/.buildozer
-          key: buildozer-${{ hashFiles('buildozer.spec') }}-sdkfix1
+          key: buildozer-${{ hashFiles('buildozer.spec') }}-v3
 
-      # ВАЖНО: этот шаг идёт ПОСЛЕ восстановления кэша,
-      # иначе кэш перезапишет файлы лицензий
+      # строго ПОСЛЕ кэша, иначе кэш затрёт файлы лицензий
       - name: Принятие лицензий Android SDK
         run: |
           SDK="$HOME/.buildozer/android/platform/android-sdk"
@@ -85,7 +95,8 @@ jobs:
             fi
             yes | "$SM" --sdk_root="$SDK" --licenses >/dev/null || true
             yes | "$SM" --sdk_root="$SDK" "platform-tools" "platforms;android-36" "build-tools;36.0.0" || true
-            sed -i -E "s|^#*[[:space:]]*android.skip_update[[:space:]]*=.*|android.skip_update = True|" buildozer.spec
+            grep -q '^android.skip_update' buildozer.spec || \
+              sed -i '/^\[app\]/a android.skip_update = True' buildozer.spec
             buildozer -v android debug 2>&1 | tee -a build.log
           fi
 
